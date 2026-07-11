@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/toolgate-core", "crates/toolgate-daemon", "crates/toolgate-hook"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Matheus Kindrazki <matheuskindrazki@gmail.com>"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+globset = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.17"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["full"] }
+uuid = { version = "1.16", features = ["v4", "serde"] }
