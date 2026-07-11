@@ -1,0 +1,12 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  quality:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cd Packages/App && swift test && swift build
