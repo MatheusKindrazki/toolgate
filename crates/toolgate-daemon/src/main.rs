@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::{env, fs, path::Path};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,12 +25,15 @@ async fn main() -> Result<()> {
 }
 pub async fn serve(socket: &str) -> Result<()> {
     let path = Path::new(socket);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-    }
+    prepare_socket_parent(path)?;
     if path.exists() {
+        #[cfg(unix)]
+        if !fs::symlink_metadata(path)?.file_type().is_socket() {
+            anyhow::bail!(
+                "refusing to replace a non-socket file at {}",
+                path.display()
+            );
+        }
         fs::remove_file(path)?;
     }
     let listener = UnixListener::bind(path)?;
@@ -47,6 +50,27 @@ pub async fn serve(socket: &str) -> Result<()> {
             let _ = handle(stream, &database).await;
         });
     }
+}
+
+fn prepare_socket_parent(socket: &Path) -> Result<()> {
+    let Some(parent) = socket.parent() else {
+        return Ok(());
+    };
+    if parent.exists() {
+        return Ok(());
+    }
+    let container = parent
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("socket path has no parent container"))?;
+    fs::create_dir_all(container)?;
+    match fs::create_dir(parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 async fn handle(mut stream: UnixStream, database: &str) -> Result<()> {
     let request = read(&mut stream).await?;
@@ -108,4 +132,66 @@ pub async fn write(stream: &mut UnixStream, message: &Envelope) -> Result<()> {
     stream.write_all(&body).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_does_not_chmod_an_existing_caller_owned_socket_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("caller-owned");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = parent.join("daemon.sock");
+        let socket_string = socket.to_string_lossy().into_owned();
+        let task = tokio::spawn(async move { serve(&socket_string).await });
+
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(socket.exists());
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_and_secures_a_missing_socket_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("toolgate/run");
+
+        prepare_socket_parent(&parent.join("daemon.sock")).unwrap();
+
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_to_replace_a_regular_file_at_the_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        fs::write(&socket, "not a socket").unwrap();
+
+        let error = serve(socket.to_str().unwrap()).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace a non-socket")
+        );
+    }
 }
